@@ -29,7 +29,7 @@ except ImportError:
 # ============================================================================
 
 # 脚本所在目录的绝对路径
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.environ.get("BILI_BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
 
 # FFmpeg 可执行文件路径：优先环境变量，其次系统 PATH
 FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '') or shutil.which('ffmpeg') or ''
@@ -321,27 +321,74 @@ def extract_title(html, playinfo):
 # ============================================================================
 
 def download_stream(url, path, headers=None, cookies=None):
-    """流式下载文件，带进度显示"""
+    """流式下载文件，带动画进度条
+
+    功能特性：
+    - 已知文件大小：显示流动进度条 + 百分比 + 文件大小
+    - 未知文件大小：显示旋转 spinner + 已下载大小
+    - 进度条动画：箭头在 '>' → '»' → '➤' 之间切换，产生流动效果
+    - 自适应单位：文件 ≥ 1024 KB 时自动显示 MB，否则显示 KB
+
+    Args:
+        url: 下载链接
+        path: 本地保存路径
+        headers: 请求头字典，默认为空
+        cookies: Cookie 字典，默认为空
+    """
     headers = headers or {}
     cookies = cookies or {}
-    logger.info(f"开始下载 -> {os.path.basename(path)}")
+    fname = os.path.basename(path)
+    logger.info(f"开始下载 -> {fname}")
     with requests.get(url, headers=headers, cookies=cookies, stream=True, timeout=60) as r:
         r.raise_for_status()
+        # 获取文件总大小（服务器可能不提供）
         total = int(r.headers.get('content-length', 0))
         downloaded = 0
+        # 进度条宽度（字符数）
+        bar_width = 40
+        # 动画相位计数器，用于切换箭头样式产生流动效果
+        phase = 0
         with open(path, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total:
-                        pct = downloaded / total * 100
-                        sys.stdout.write(
-                            f"\r  进度: {pct:.1f}% "
-                            f"({downloaded//1024}/{total//1024} KB)"
-                        )
+                        # ===== 已知总大小：显示进度条 =====
+                        pct = downloaded / total
+                        filled = int(bar_width * pct)
+                        # 每接收一个 chunk，相位前进 1/6 周期
+                        phase = (phase + 1) % 6
+                        if filled < bar_width:
+                            # 根据相位切换箭头样式：'>' → '»' → '➤'，产生流动感
+                            arrow = '>' if phase < 3 else '»' if phase < 5 else '➤'
+                            bar = '=' * filled + arrow + ' ' * (bar_width - filled - 1)
+                        else:
+                            # 进度满格后箭头消失，全显示 '='
+                            bar = '=' * bar_width
+                        cur_kb = downloaded // 1024
+                        total_kb = total // 1024
+                        # 自适应单位：大于等于 1024 KB 显示 MB
+                        if total_kb >= 1024:
+                            cur_mb = downloaded / 1024 / 1024
+                            total_mb = total / 1024 / 1024
+                            size_str = f"{cur_mb:.1f}/{total_mb:.1f} MB"
+                        else:
+                            size_str = f"{cur_kb}/{total_kb} KB"
+                        # \r 回到行首，实现单行刷新；百分比右对齐 5 字符宽度
+                        sys.stdout.write(f"\r  [{bar}] {pct*100:5.1f}%  {size_str}")
                         sys.stdout.flush()
-    print()  # 进度条换行
+                    else:
+                        # ===== 未知总大小：显示旋转 spinner =====
+                        # 每接收一个 chunk，相位前进 1/8 周期
+                        phase = (phase + 1) % 8
+                        # 4 种旋转状态：'|' → '/' → '—' → '\\'
+                        spinner = '|/—\\'[phase % 4]
+                        cur_kb = downloaded // 1024
+                        sys.stdout.write(f"\r  {spinner} 下载中... {cur_kb} KB")
+                        sys.stdout.flush()
+    # 下载完成换行，避免后续输出接在进度条后面
+    print()
     logger.info(f"下载完成: {path}")
 
 
