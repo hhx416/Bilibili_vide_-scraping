@@ -1,6 +1,6 @@
 # Bilibili Spider Toolkit
 
-A pure Python toolkit for downloading videos and bangumi (anime/series) from Bilibili. Supports both regular videos (BV ID) and bangumi (SS/EP ID).
+A pure Python toolkit for downloading videos and bangumi (anime/series) from Bilibili. Supports regular videos (BV ID), bangumi (SS/EP ID), and search-based batch downloads.
 
 > 🇨🇳 **中文版**: [README.md](README.md)
 
@@ -25,20 +25,30 @@ A pure Python toolkit for downloading videos and bangumi (anime/series) from Bil
 
 ## Features
 
-### Search & Batch Download Spider (bsps.py / bsps - 副本.py)
+### 🎛️ Master Controller (main.py)
+
+- ✅ **Unified entry point**: One program calls all three spider scripts
+- ✅ **Mixed batch tasks**: Custom task queue with single video / search / bangumi downloads
+- ✅ **Unified Cookie management**: Set once, used by all three scripts
+- ✅ **Summary report**: Auto-generated summary report after batch tasks
+- ✅ **Task list management**: Add, view, and clear tasks
+
+### 🔍 Search & Batch Download Spider (bsps.py / bsps - 副本.py)
 
 - ✅ Keyword-based video search, auto-extracts BV IDs
-- ✅ **Multi-process concurrent download**, 2 videos per process
+- ✅ **Multi-process concurrent download**, dynamically allocated (1~8 processes)
+- ✅ **Multi-threaded chunked download**, up to 8 threads per file
 - ✅ Highest quality by default, auto-picks best codec
 - ✅ Filename includes publish date: `[YYYY-MM-DD] Title.mp4`
 - ✅ Auto FFmpeg merge, output to `output/` directory
+- ✅ Two-stage pipeline: Download phase → Merge phase, more efficient
 - ✅ Per-video logs with process ID prefix
 - ✅ Detailed summary at the end (success/fail list, total time)
 - ✅ Request interval delay, simulates real user behavior
 - ✅ Dual log output: console + file
 - ✅ Both minimal and fully-commented versions available
 
-### Bangumi Spider (bsp.py / bilibili_pgc_spider - 副本.py)
+### 📺 Bangumi Spider (bsp.py / bilibili_pgc_spider - 副本.py)
 
 - ✅ Supports both SS (season) and EP (episode) URLs
 - ✅ Auto-parses both DASH and DURL video formats
@@ -53,7 +63,7 @@ A pure Python toolkit for downloading videos and bangumi (anime/series) from Bil
 - ✅ Dual log output: console + file
 - ✅ Automatic filename sanitization
 
-### Regular Video Spider (bspv.py)
+### 🎬 Regular Video Spider (bspv.py)
 
 - ✅ Supports BV ID video downloads
 - ✅ DASH format parsing, separate video/audio
@@ -66,17 +76,32 @@ A pure Python toolkit for downloading videos and bangumi (anime/series) from Bil
 
 ## Files
 
+### Core Scripts
+
 | Filename | Type | Description |
 |----------|------|-------------|
+| `main.py` | Master controller | Unified entry point with mixed batch task scheduling |
 | `bsps.py` | Search & batch download (minimal) | Keyword search + multi-process batch download |
 | `bsps - 副本.py` | Search & batch download (commented) | Detailed comments, for learning code logic |
 | `bsp.py` | Bangumi spider (minimal) | No extra comments, compact code, for daily use |
 | `bilibili_pgc_spider - 副本.py` | Bangumi spider (commented) | Detailed comments on every function, for learning |
 | `bspv.py` | Regular video spider | BV ID based video download tool |
-| `cookie.txt` | Config (create yourself) | Store your Bilibili login cookie, one line |
-| `bilibili_spider.txt` | Log (auto-generated) | Runtime logs for debugging |
 
-> 💡 The two bangumi spiders have **identical functionality**, differing only in the amount of comments. Use whichever fits your needs.
+### Config & Logs
+
+| Filename | Type | Description |
+|----------|------|-------------|
+| `cookie.txt` | Config (create yourself) | Store your Bilibili login cookie, one line |
+| `log/` | Log directory (auto-generated) | Independent log per run, named: `timestamp_scriptname.log` |
+| `output/` | Output directory (auto-generated) | All download results in one place |
+
+### Other Directories
+
+| Directory | Description |
+|-----------|-------------|
+| `test/` | Beta scripts | Latest feature test versions, may include experimental features |
+
+> 💡 The paired scripts have **identical functionality**, differing only in the amount of comments. Use whichever fits your needs.
 
 ---
 
@@ -121,7 +146,13 @@ SESSDATA=your_SESSDATA; bili_jct=your_bili_jct; DedeUserID=your_UID
 
 ### 3. Run the Script
 
-**Search & batch download (recommended):**
+**Master Controller (recommended):**
+```bash
+python main.py
+# Choose: Single video / Search batch / Bangumi / Mixed batch tasks
+```
+
+**Search & batch download:**
 ```bash
 python bsps.py
 # Enter search keyword
@@ -195,7 +226,7 @@ The script looks for FFmpeg in the following priority order:
 
 **Manual path example (Windows):**
 ```python
-# Modify at the top of bsp.py:
+# Modify at the top of the script:
 FFMPEG_PATH = r'C:\ffmpeg\bin\ffmpeg.exe'
 ```
 
@@ -215,9 +246,34 @@ The script automatically chooses the available merge method:
 
 ## Usage
 
+### Master Controller (main.py)
+
+**Unified entry point with three download modes and mixed batch tasks.**
+
+**Main menu:**
+```
+  1. Single video download (BV ID)
+  2. Search & batch download
+  3. Bangumi download (PGC)
+  4. Mixed batch tasks
+  5. Set Cookie
+  0. Exit
+```
+
+**Mixed batch task commands:**
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `bv <BV_ID> [quality_ID]` | Add single video task | `bv BV1xx411c7mD 116` |
+| `search <keyword> [count]` | Add search download task | `search Python tutorial 10` |
+| `pgc <URL>` | Add bangumi download task | `pgc https://www.bilibili.com/bangumi/play/epxxx` |
+| `list` | View current task list | |
+| `clear` | Clear task list | |
+| `done` | Start executing all tasks | |
+
 ### Search & Batch Download (bsps.py)
 
-**Search videos by keyword, download in parallel with multi-processing.**
+**Keyword-based video search with multi-process batch download + multi-thread chunked acceleration.**
 
 **Interactive flow:**
 1. Enter search keyword
@@ -225,19 +281,20 @@ The script automatically chooses the available merge method:
 3. Auto-read `cookie.txt` (prompts for input if not found)
 4. Auto-validate cookie
 5. Search videos and extract BV IDs
-6. Distribute tasks with 2 videos per process, start concurrent download
-7. Each video uses highest quality by default, auto-download video + audio
-8. FFmpeg auto-merge to MP4, filename includes publish date
+6. Dynamically allocate download processes, start concurrent download
+7. Each video uses multi-thread chunked download, video+audio in parallel
+8. Stage 2: Multi-process FFmpeg batch merge to MP4
 9. Detailed summary at the end (success/fail list, total time)
 
-**Multi-process allocation rules:**
+**Dynamic process allocation rules:**
 
-| Download Count | Processes | Tasks per Process |
-|----------------|-----------|-------------------|
-| 1~2 | 1 | 2 / 1 |
-| 3~4 | 2 | 2 / 2 |
-| 5~6 | 3 | 2 / 2 / 2 |
-| ... | ... | ... |
+| Download Count | Processes | Description |
+|----------------|-----------|-------------|
+| 1~2 | 1 | Single process for small batches |
+| 3~4 | 2 | Dual process |
+| 5~8 | 3 | Triple process |
+| 9~16 | 4 | Quad process |
+| 16+ | Up to 8 | Dynamically adjusted based on CPU cores |
 
 ### Bangumi Spider (bsp.py)
 
@@ -271,38 +328,31 @@ The script automatically chooses the available merge method:
 
 ## Output Structure
 
-### Search & Batch Download Spider
+### Unified Output
+
+All scripts' download results are stored in the `output/` directory:
 
 ```
 output/
-├── video/                                          # Video segments (auto-deleted after merge)
-│   ├── [2024-01-15] Video Title 1.m4s
-│   └── [2024-01-16] Video Title 2.m4s
-├── audio/                                          # Audio segments (auto-deleted after merge)
-│   ├── [2024-01-15] Video Title 1.m4a
-│   └── [2024-01-16] Video Title 2.m4a
-├── [2024-01-15] Video Title 1.mp4                   # Merged complete video
-└── [2024-01-16] Video Title 2.mp4                   # Merged complete video
-```
-
-### Bangumi Spider
-
-```
-downloads/
-├── video/                                  # Video files (unmerged)
+├── .tmp/                               # Temporary files (downloading)
+│   ├── [2024-01-15] Video Title_video.m4s
+│   └── [2024-01-15] Video Title_audio.m4a
+├── video/                              # Video source files (optional)
 │   └── Bangumi Name EP X: Title.m4s
-├── audio/                                  # Audio files (unmerged)
-│   └── Bangumi Name EP X: Title.m4s
-└── Bangumi Name EP X: Title.mp4             # Merged complete video (optional)
+├── audio/                              # Audio source files (optional)
+│   └── Bangumi Name EP X: Title.m4a
+├── [2024-01-15] Video Title 1.mp4       # Merged complete video
+└── [2024-01-16] Video Title 2.mp4       # Merged complete video
 ```
 
-### Regular Video Spider
+### Logs & Results
 
 ```
-video/                  # Video files
-└── Video Title.mp4
-audio/                  # Audio files
-└── Video Title.mp3
+log/
+├── 20240115_153020_bsps.log            # Runtime log
+├── 20240115_153020_bsps_result.txt     # Result file
+├── 20240115_153100_bsp.log             # Bangumi spider log
+└── 20240115_153200_batch_summary.txt   # Master controller batch summary
 ```
 
 ---
@@ -358,35 +408,35 @@ A:
 
 A: Resumable downloads are not currently supported. You'll need to re-download. For large files, we recommend downloading when your network is stable.
 
+> 💡 bsps.py's multi-thread chunked download doesn't support resume, but it's faster and less likely to be interrupted.
+
 ### Q: Does it support batch downloading?
 
-A: Yes! Use the `bsps.py` search & batch download script:
-- Keyword-based video search
-- Multi-process concurrent download (2 videos per process)
-- Auto-merge, filenames include publish date
-- See [Search & Batch Download (bsps.py)](#search--batch-download-bspy)
-
-The bangumi and single-video scripts (bsp.py / bspv.py) only support single episode/video downloads.
+A: Yes! Use the `bsps.py` search & batch download script, or `main.py`'s mixed batch task mode.
 
 ### Q: Does it support downloading danmaku (bullet comments) or subtitles?
 
 A: No, only video and audio are downloaded.
 
-### Q: What's the difference between the two bangumi scripts?
+### Q: What's the difference between the paired scripts?
 
 A: Identical functionality, only difference is the amount of comments:
-- `bsp.py`: minimal version, no extra comments, for daily use
-- `bilibili_pgc_spider - 副本.py`: fully commented version, for learning the code
+- `*.py` (e.g. `bsp.py`): minimal version, no extra comments, for daily use
+- `* - 副本.py` (e.g. `bsps - 副本.py`): fully commented version, for learning the code
 
-### Q: What's the difference between the two bsps scripts?
+### Q: What's the test/ directory?
 
-A: Identical functionality, only difference is the amount of comments:
-- `bsps.py`: minimal version, no extra comments, for daily use
-- `bsps - 副本.py`: fully commented version, for learning the code
+A: The test/ directory contains beta versions with the latest features, which may include experimental functionality. Use the scripts in the root directory for stable versions.
 
-### Q: Why are there request delays in search download?
+### Q: What's the difference between the master controller and running scripts individually?
 
-A: To simulate real user behavior and reduce the risk of triggering Bilibili's anti-crawler mechanisms. There's a 1-2 second delay between each video — slightly slower but more stable.
+A: The master controller `main.py` calls three scripts through subprocess. Benefits:
+- Unified entry point, no need to remember different script names
+- Cookie set once, used by all three scripts
+- Supports mixed batch tasks (e.g. search then download, then download bangumi)
+- Auto-generates summary reports
+
+Running scripts individually is more straightforward, suitable when you only need one feature.
 
 ---
 
@@ -401,9 +451,11 @@ A: To simulate real user behavior and reduce the risk of triggering Bilibili's a
 5. **Data normalization**: Unify different data structures between PGC bangumi and regular videos
 6. **Quality selection**: Group and deduplicate by quality ID, sort from high to low
 7. **Publish date**: Extract pubdate/ctime from playinfo, format as date string
-8. **Streaming download**: `stream=True` for chunked download with real-time progress
-9. **Audio/video merge**: Call FFmpeg for lossless merge (`-c copy`)
-10. **Multi-process concurrency**: `multiprocessing.Pool` pool, 2 tasks per process
+8. **Chunked download**: Multi-threaded Range requests, merge from memory buffer
+9. **Streaming download**: `stream=True` for chunked download with real-time progress
+10. **Audio/video merge**: Call FFmpeg for lossless merge (`-c copy`)
+11. **Multi-process concurrency**: `multiprocessing.Pool` pool, dynamically adjust workers
+12. **Task scheduling**: Master controller auto-passes params via subprocess + stdin
 
 ### Dependencies
 
@@ -414,7 +466,9 @@ A: To simulate real user behavior and reduce the risk of triggering Bilibili's a
 - `subprocess` / `ffmpeg-python` — FFmpeg invocation
 - `shutil` — Executable path lookup
 - `multiprocessing` — Multi-process concurrency
+- `threading` + `concurrent.futures` — Multi-threaded chunked download
 - `datetime` — Date and time handling
+- `io` — In-memory byte stream (chunk buffer)
 
 ---
 
