@@ -1,0 +1,920 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import os
+import sys
+import time
+import shutil
+import hashlib
+import subprocess
+import threading
+import queue
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_DIR = os.path.join(BASE_DIR, "scripts")
+
+SCRIPT_NAMES = {
+    "bspv": "单视频下载",
+    "bsps": "搜索批量下载",
+    "bsp":  "番剧下载",
+}
+
+REFERENCE_HASHES = {
+    "bspv": "546ec42f7c130edb01ecc90e50f029535b8e7ad943fa2f1c77cc0133032d1724",
+    "bsps": "11d2e5c91cebd3e687b3336ff3a70bfed43835c1781f92923cf7e03e8ef4a26a",
+    "bsp":  "3a0b40dca8afb6c3341a1ff5da078266cb01ccf422fac80ef21e5c481f739d03",
+}
+
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+LOG_DIR = os.path.join(BASE_DIR, "log")
+COOKIE_FILE = os.path.join(BASE_DIR, "cookie.txt")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(SCRIPTS_DIR, exist_ok=True)
+
+
+def find_script_by_hash(script_key):
+    ref_hash = REFERENCE_HASHES.get(script_key)
+    if not ref_hash or not os.path.isdir(SCRIPTS_DIR):
+        return None
+    for fname in os.listdir(SCRIPTS_DIR):
+        fpath = os.path.join(SCRIPTS_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, 'rb') as f:
+                h = hashlib.sha256(f.read()).hexdigest()
+            if h.lower() == ref_hash.lower():
+                return fpath
+        except Exception:
+            continue
+    return None
+
+
+def get_script_hash(fpath):
+    try:
+        with open(fpath, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return None
+
+
+SCRIPTS = {}
+
+
+def init_scripts():
+    global SCRIPTS
+    SCRIPTS = {}
+    for key in SCRIPT_NAMES:
+        path = find_script_by_hash(key)
+        if path:
+            SCRIPTS[key] = path
+
+
+init_scripts()
+
+
+class BilibiliDownloaderGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("B站下载工具箱")
+        self.root.geometry("900x700")
+        self.root.minsize(800, 600)
+
+        self.cookie = self._load_cookie()
+        self.is_running = False
+        self.log_queue = queue.Queue()
+        self.batch_tasks = []
+        self.script_status = {}
+
+        self._setup_style()
+        self._build_ui()
+        self._update_cookie_status()
+        self._process_log_queue()
+        self._check_scripts()
+
+    def _setup_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+        style.configure('TNotebook.Tab', padding=[20, 8], font=('Microsoft YaHei', 10))
+        style.configure('TLabel', font=('Microsoft YaHei', 9))
+        style.configure('TButton', font=('Microsoft YaHei', 9), padding=8)
+        style.configure('Header.TLabel', font=('Microsoft YaHei', 11, 'bold'))
+        style.configure('Status.TLabel', font=('Microsoft YaHei', 9))
+
+    def _build_ui(self):
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 顶部状态栏
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(status_frame, text="B站下载工具箱", style='Header.TLabel').pack(side=tk.LEFT)
+
+        self.cookie_status_label = ttk.Label(status_frame, text="", style='Status.TLabel')
+        self.cookie_status_label.pack(side=tk.RIGHT)
+
+        # 标签页
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self._build_single_tab()
+        self._build_search_tab()
+        self._build_pgc_tab()
+        self._build_batch_tab()
+        self._build_cookie_tab()
+        self._build_info_tab()
+
+        # 底部日志区
+        log_frame = ttk.LabelFrame(main_frame, text="运行日志", padding=5)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, height=12, wrap=tk.WORD,
+            font=('Consolas', 9), bg='#1e1e1e', fg='#d4d4d4',
+            insertbackground='white'
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.configure(state='disabled')
+
+        # 底部按钮
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.clear_log_btn = ttk.Button(btn_frame, text="清空日志", command=self._clear_log)
+        self.clear_log_btn.pack(side=tk.LEFT)
+
+        self.open_output_btn = ttk.Button(btn_frame, text="打开输出目录", command=self._open_output_dir)
+        self.open_output_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.open_log_btn = ttk.Button(btn_frame, text="打开日志目录", command=self._open_log_dir)
+        self.open_log_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.status_var = tk.StringVar(value="就绪")
+        ttk.Label(btn_frame, textvariable=self.status_var, style='Status.TLabel').pack(side=tk.RIGHT)
+
+    def _build_single_tab(self):
+        frame = ttk.Frame(self.notebook, padding=20)
+        self.notebook.add(frame, text="单视频下载")
+
+        ttk.Label(frame, text="BV号：", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.bv_entry = ttk.Entry(frame, width=40)
+        self.bv_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.bv_entry.insert(0, "BV1GJ411x7h7")
+
+        ttk.Label(frame, text="画质ID：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.quality_entry = ttk.Entry(frame, width=20)
+        self.quality_entry.grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        ttk.Label(frame, text="(留空默认最高画质)").grid(row=1, column=2, sticky=tk.W, pady=5, padx=(10, 0))
+
+        ttk.Separator(frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=15)
+
+        self.download_single_btn = ttk.Button(frame, text="开始下载", command=self._download_single)
+        self.download_single_btn.grid(row=3, column=0, columnspan=3, pady=10, ipadx=30)
+
+        info_text = (
+            "说明：\n"
+            "• 输入BV号（如 BV1GJ411x7h7）即可下载\n"
+            "• 画质ID可选，例如 116=1080P60，留空默认最高画质\n"
+            "• 下载的视频保存在 output/ 目录"
+        )
+        ttk.Label(frame, text=info_text, foreground='gray').grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+    def _build_search_tab(self):
+        frame = ttk.Frame(self.notebook, padding=20)
+        self.notebook.add(frame, text="搜索批量下载")
+
+        ttk.Label(frame, text="搜索关键词：", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.keyword_entry = ttk.Entry(frame, width=40)
+        self.keyword_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+
+        ttk.Label(frame, text="下载数量：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.count_entry = ttk.Entry(frame, width=20)
+        self.count_entry.grid(row=1, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.count_entry.insert(0, "5")
+
+        ttk.Separator(frame, orient='horizontal').grid(row=2, column=0, columnspan=3, sticky='ew', pady=15)
+
+        self.download_search_btn = ttk.Button(frame, text="开始搜索并下载", command=self._download_search)
+        self.download_search_btn.grid(row=3, column=0, columnspan=3, pady=10, ipadx=30)
+
+        info_text = (
+            "说明：\n"
+            "• 根据关键词自动搜索B站视频\n"
+            "• 多进程并发下载，自动合并音视频\n"
+            "• 文件名自动带发布日期前缀"
+        )
+        ttk.Label(frame, text=info_text, foreground='gray').grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+    def _build_pgc_tab(self):
+        frame = ttk.Frame(self.notebook, padding=20)
+        self.notebook.add(frame, text="番剧下载")
+
+        ttk.Label(frame, text="番剧URL：", style='Header.TLabel').grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.pgc_entry = ttk.Entry(frame, width=50)
+        self.pgc_entry.grid(row=0, column=1, sticky=tk.W, pady=5, padx=(10, 0))
+        self.pgc_entry.insert(0, "https://www.bilibili.com/bangumi/play/ss33415")
+
+        ttk.Separator(frame, orient='horizontal').grid(row=1, column=0, columnspan=3, sticky='ew', pady=15)
+
+        self.download_pgc_btn = ttk.Button(frame, text="开始下载番剧", command=self._download_pgc)
+        self.download_pgc_btn.grid(row=2, column=0, columnspan=3, pady=10, ipadx=30)
+
+        info_text = (
+            "说明：\n"
+            "• 支持SS号和EP号链接\n"
+            "• 例：https://www.bilibili.com/bangumi/play/ss33415\n"
+            "• 下载后可选是否合并音视频"
+        )
+        ttk.Label(frame, text=info_text, foreground='gray').grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=10)
+
+    def _build_batch_tab(self):
+        frame = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(frame, text="批量混合任务")
+
+        # 左侧：添加任务
+        left_frame = ttk.Frame(frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+        ttk.Label(left_frame, text="添加任务", style='Header.TLabel').pack(anchor=tk.W, pady=(0, 5))
+
+        # 任务类型选择
+        type_frame = ttk.Frame(left_frame)
+        type_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(type_frame, text="任务类型：").pack(side=tk.LEFT)
+        self.task_type_var = tk.StringVar(value="bv")
+        task_types = [
+            ("单视频 (BV号)", "bv"),
+            ("搜索批量", "search"),
+            ("番剧 (PGC)", "pgc"),
+        ]
+        for text, val in task_types:
+            ttk.Radiobutton(type_frame, text=text, variable=self.task_type_var,
+                            value=val, command=self._on_task_type_change).pack(side=tk.LEFT, padx=5)
+
+        # 任务参数
+        param_frame = ttk.LabelFrame(left_frame, text="任务参数", padding=10)
+        param_frame.pack(fill=tk.X, pady=5)
+
+        self.task_param1_label = ttk.Label(param_frame, text="BV号：")
+        self.task_param1_label.grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.task_param1_entry = ttk.Entry(param_frame, width=35)
+        self.task_param1_entry.grid(row=0, column=1, sticky=tk.W, pady=3, padx=(5, 0))
+
+        self.task_param2_label = ttk.Label(param_frame, text="画质ID：")
+        self.task_param2_label.grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.task_param2_entry = ttk.Entry(param_frame, width=20)
+        self.task_param2_entry.grid(row=1, column=1, sticky=tk.W, pady=3, padx=(5, 0))
+
+        add_btn = ttk.Button(left_frame, text="＋ 添加到任务列表", command=self._add_batch_task)
+        add_btn.pack(fill=tk.X, pady=10)
+
+        # 右侧：任务列表
+        right_frame = ttk.Frame(frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+        list_header = ttk.Frame(right_frame)
+        list_header.pack(fill=tk.X)
+        ttk.Label(list_header, text="任务列表", style='Header.TLabel').pack(side=tk.LEFT)
+        self.task_count_var = tk.StringVar(value="共 0 个任务")
+        ttk.Label(list_header, textvariable=self.task_count_var).pack(side=tk.RIGHT)
+
+        self.task_listbox = tk.Listbox(right_frame, font=('Microsoft YaHei', 9))
+        self.task_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        list_btn_frame = ttk.Frame(right_frame)
+        list_btn_frame.pack(fill=tk.X)
+
+        ttk.Button(list_btn_frame, text="删除选中", command=self._remove_selected_task).pack(side=tk.LEFT)
+        ttk.Button(list_btn_frame, text="清空列表", command=self._clear_batch_tasks).pack(side=tk.LEFT, padx=(5, 0))
+
+        self.run_batch_btn = ttk.Button(right_frame, text="▶ 开始执行全部任务", command=self._run_batch_tasks)
+        self.run_batch_btn.pack(fill=tk.X, pady=(10, 0))
+
+    def _build_cookie_tab(self):
+        frame = ttk.Frame(self.notebook, padding=20)
+        self.notebook.add(frame, text="Cookie 设置")
+
+        ttk.Label(frame, text="B站登录Cookie", style='Header.TLabel').pack(anchor=tk.W)
+        ttk.Label(frame, text="(登录后可下载更高画质)", foreground='gray').pack(anchor=tk.W, pady=(0, 10))
+
+        self.cookie_text = scrolledtext.ScrolledText(frame, height=8, font=('Consolas', 9))
+        self.cookie_text.pack(fill=tk.X, pady=5)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(btn_frame, text="保存Cookie", command=self._save_cookie).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="从文件加载", command=self._load_cookie_to_text).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(btn_frame, text="清空", command=self._clear_cookie).pack(side=tk.LEFT, padx=(10, 0))
+
+        help_text = (
+            "获取方法：\n"
+            "1. 浏览器打开 bilibili.com 并登录\n"
+            "2. 按 F12 打开开发者工具，切换到 Network 标签\n"
+            "3. 刷新页面，随便点一个请求\n"
+            "4. 在请求头里找到 Cookie: 那一行，复制整行内容\n"
+            "5. 粘贴到上面的输入框并保存"
+        )
+        ttk.Label(frame, text=help_text, foreground='gray').pack(anchor=tk.W, pady=10)
+
+        if self.cookie:
+            self.cookie_text.insert('1.0', self.cookie)
+
+    def _build_info_tab(self):
+        frame = ttk.Frame(self.notebook, padding=15)
+        self.notebook.add(frame, text="脚本信息")
+
+        # 脚本目录
+        dir_header = ttk.Frame(frame)
+        dir_header.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(dir_header, text=" scripts/ 脚本目录 ", style='Header.TLabel').pack(side=tk.LEFT)
+        ttk.Button(dir_header, text="打开目录",
+                   command=lambda: self._open_path(SCRIPTS_DIR)).pack(side=tk.RIGHT)
+        ttk.Button(dir_header, text="重新验证",
+                   command=self._recheck_scripts).pack(side=tk.RIGHT, padx=(0, 10))
+
+        dir_entry_frame = ttk.Frame(frame)
+        dir_entry_frame.pack(fill=tk.X, pady=(0, 10))
+        self.scripts_dir_entry = ttk.Entry(dir_entry_frame)
+        self.scripts_dir_entry.insert(0, SCRIPTS_DIR)
+        self.scripts_dir_entry.configure(state='readonly')
+        self.scripts_dir_entry.pack(fill=tk.X)
+
+        # 脚本验证结果
+        script_frame = ttk.LabelFrame(frame, text=" 脚本验证结果（SHA256内容匹配） ", padding=10)
+        script_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.script_status_labels = {}
+        self.script_path_entries = {}
+        self.script_hash_labels = {}
+
+        headers = ["脚本名称", "状态", "文件路径", "文件哈希"]
+        widths = [120, 80, 300, 200]
+        for col, (h, w) in enumerate(zip(headers, widths)):
+            lbl = ttk.Label(script_frame, text=h, font=('Microsoft YaHei', 9, 'bold'))
+            lbl.grid(row=0, column=col, sticky=tk.W, pady=(0, 5), padx=(0, 10))
+
+        for i, (key, name) in enumerate(SCRIPT_NAMES.items(), 1):
+            name_label = ttk.Label(script_frame, text=f"{name}\n({key}.py)")
+            name_label.grid(row=i, column=0, sticky=tk.W, pady=3, padx=(0, 10))
+
+            status_label = tk.Label(script_frame, text="检测中...", fg="gray")
+            status_label.grid(row=i, column=1, sticky=tk.W, pady=3, padx=(0, 10))
+            self.script_status_labels[key] = status_label
+
+            path_entry = ttk.Entry(script_frame, width=45)
+            path_entry.grid(row=i, column=2, sticky=tk.W, pady=3, padx=(0, 10))
+            path_entry.configure(state='readonly')
+            self.script_path_entries[key] = path_entry
+
+            hash_label = ttk.Label(script_frame, text="-", font=('Consolas', 8))
+            hash_label.grid(row=i, column=3, sticky=tk.W, pady=3)
+            self.script_hash_labels[key] = hash_label
+
+        # 目录路径
+        dir_frame = ttk.LabelFrame(frame, text=" 目录路径 ", padding=10)
+        dir_frame.pack(fill=tk.X, pady=(0, 10))
+
+        dir_info = [
+            ("工作目录 (BASE_DIR)", BASE_DIR),
+            ("输出目录 (output)", OUTPUT_DIR),
+            ("日志目录 (log)", LOG_DIR),
+        ]
+        for i, (name, path) in enumerate(dir_info):
+            ttk.Label(dir_frame, text=name + "：").grid(row=i, column=0, sticky=tk.W, pady=3)
+            entry = ttk.Entry(dir_frame, width=60)
+            entry.insert(0, path)
+            entry.configure(state='readonly')
+            entry.grid(row=i, column=1, sticky=tk.W, pady=3, padx=(10, 5))
+            btn = ttk.Button(dir_frame, text="打开",
+                            command=lambda p=path: self._open_path(p))
+            btn.grid(row=i, column=2, sticky=tk.W, pady=3, padx=(0, 10))
+
+        # 文件路径
+        file_frame = ttk.LabelFrame(frame, text=" 文件路径 ", padding=10)
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+
+        file_info = [
+            ("Cookie 文件", COOKIE_FILE),
+        ]
+        for i, (name, path) in enumerate(file_info):
+            ttk.Label(file_frame, text=name + "：").grid(row=i, column=0, sticky=tk.W, pady=3)
+            entry = ttk.Entry(file_frame, width=60)
+            entry.insert(0, path)
+            entry.configure(state='readonly')
+            entry.grid(row=i, column=1, sticky=tk.W, pady=3, padx=(10, 5))
+            exists = os.path.exists(path)
+            status_text = "✓ 存在" if exists else "✗ 不存在"
+            status_color = "green" if exists else "red"
+            status_label = tk.Label(file_frame, text=status_text, fg=status_color)
+            status_label.grid(row=i, column=2, sticky=tk.W, pady=3, padx=(0, 10))
+
+        # FFmpeg 信息
+        ffmpeg_frame = ttk.LabelFrame(frame, text=" FFmpeg 信息 ", padding=10)
+        ffmpeg_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ffmpeg_path = shutil.which('ffmpeg') or '未检测到'
+        ttk.Label(ffmpeg_frame, text="FFmpeg 路径：").grid(row=0, column=0, sticky=tk.W, pady=3)
+        ffmpeg_entry = ttk.Entry(ffmpeg_frame, width=60)
+        ffmpeg_entry.insert(0, ffmpeg_path)
+        ffmpeg_entry.configure(state='readonly')
+        ffmpeg_entry.grid(row=0, column=1, sticky=tk.W, pady=3, padx=(10, 5))
+        ffmpeg_exists = ffmpeg_path != '未检测到'
+        ffmpeg_status_text = "✓ 可用" if ffmpeg_exists else "✗ 未安装"
+        ffmpeg_status_color = "green" if ffmpeg_exists else "red"
+        ffmpeg_status_label = tk.Label(ffmpeg_frame, text=ffmpeg_status_text, fg=ffmpeg_status_color)
+        ffmpeg_status_label.grid(row=0, column=2, sticky=tk.W, pady=3, padx=(0, 10))
+
+        # Python 信息
+        py_frame = ttk.LabelFrame(frame, text=" Python 环境 ", padding=10)
+        py_frame.pack(fill=tk.X)
+
+        py_info = [
+            ("Python 解释器", sys.executable),
+            ("Python 版本", sys.version.split()[0]),
+        ]
+        for i, (name, path) in enumerate(py_info):
+            ttk.Label(py_frame, text=name + "：").grid(row=i, column=0, sticky=tk.W, pady=3)
+            entry = ttk.Entry(py_frame, width=60)
+            entry.insert(0, path)
+            entry.configure(state='readonly')
+            entry.grid(row=i, column=1, sticky=tk.W, pady=3, padx=(10, 5))
+
+    def _recheck_scripts(self):
+        self._check_scripts()
+        self._update_script_info_display()
+
+    def _update_script_info_display(self):
+        for key, name in SCRIPT_NAMES.items():
+            status_label = self.script_status_labels.get(key)
+            path_entry = self.script_path_entries.get(key)
+            hash_label = self.script_hash_labels.get(key)
+            if not status_label or not path_entry or not hash_label:
+                continue
+
+            path = SCRIPTS.get(key)
+            if path:
+                status_label.config(text="✓ 验证通过", fg="green")
+                path_entry.configure(state='normal')
+                path_entry.delete(0, tk.END)
+                path_entry.insert(0, path)
+                path_entry.configure(state='readonly')
+                h = get_script_hash(path)
+                hash_label.config(text=h[:16] + "..." if h else "-")
+            else:
+                status_label.config(text="✗ 未找到", fg="red")
+                path_entry.configure(state='normal')
+                path_entry.delete(0, tk.END)
+                path_entry.insert(0, "(未找到匹配文件)")
+                path_entry.configure(state='readonly')
+                ref = REFERENCE_HASHES.get(key, "")
+                hash_label.config(text=f"期望: {ref[:16]}...")
+
+    def _on_task_type_change(self):
+        t = self.task_type_var.get()
+        if t == "bv":
+            self.task_param1_label.config(text="BV号：")
+            self.task_param2_label.config(text="画质ID：")
+            self.task_param2_entry.config(state='normal')
+        elif t == "search":
+            self.task_param1_label.config(text="关键词：")
+            self.task_param2_label.config(text="数量：")
+            self.task_param2_entry.config(state='normal')
+            self.task_param2_entry.delete(0, tk.END)
+            self.task_param2_entry.insert(0, "5")
+        elif t == "pgc":
+            self.task_param1_label.config(text="番剧URL：")
+            self.task_param2_label.config(text="(自动选画质)")
+            self.task_param2_entry.config(state='disabled')
+
+    def _add_batch_task(self):
+        t = self.task_type_var.get()
+        param1 = self.task_param1_entry.get().strip()
+        param2 = self.task_param2_entry.get().strip()
+
+        if not param1:
+            messagebox.showwarning("提示", "请输入参数")
+            return
+
+        if t == "bv":
+            desc = f"单视频: {param1}"
+            if param2:
+                desc += f" (画质:{param2})"
+            else:
+                desc += " (最高画质)"
+            task = {"type": "bv", "bv": param1, "quality": param2, "desc": desc}
+        elif t == "search":
+            count = int(param2) if param2.isdigit() else 5
+            desc = f"搜索下载: {param1} ({count}个)"
+            task = {"type": "search", "keyword": param1, "count": count, "desc": desc}
+        elif t == "pgc":
+            desc = f"番剧下载: {param1}"
+            task = {"type": "pgc", "url": param1, "desc": desc}
+        else:
+            return
+
+        self.batch_tasks.append(task)
+        self.task_listbox.insert(tk.END, f"{len(self.batch_tasks)}. {task['desc']}")
+        self._update_task_count()
+        self.task_param1_entry.delete(0, tk.END)
+        if t == "bv":
+            self.task_param2_entry.delete(0, tk.END)
+
+    def _remove_selected_task(self):
+        selected = self.task_listbox.curselection()
+        if not selected:
+            return
+        idx = selected[0]
+        del self.batch_tasks[idx]
+        self.task_listbox.delete(idx)
+        self._refresh_task_listbox()
+
+    def _clear_batch_tasks(self):
+        self.batch_tasks = []
+        self.task_listbox.delete(0, tk.END)
+        self._update_task_count()
+
+    def _refresh_task_listbox(self):
+        self.task_listbox.delete(0, tk.END)
+        for i, t in enumerate(self.batch_tasks, 1):
+            self.task_listbox.insert(tk.END, f"{i}. {t['desc']}")
+        self._update_task_count()
+
+    def _update_task_count(self):
+        self.task_count_var.set(f"共 {len(self.batch_tasks)} 个任务")
+
+    def _load_cookie(self):
+        if os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        return ""
+
+    def _save_cookie(self):
+        cookie_str = self.cookie_text.get('1.0', tk.END).strip()
+        if cookie_str:
+            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+                f.write(cookie_str)
+            self.cookie = cookie_str
+            self._update_cookie_status()
+            messagebox.showinfo("成功", f"Cookie 已保存 ({len(cookie_str)} 字符)")
+        else:
+            messagebox.showwarning("提示", "Cookie 不能为空")
+
+    def _load_cookie_to_text(self):
+        cookie = self._load_cookie()
+        self.cookie_text.delete('1.0', tk.END)
+        if cookie:
+            self.cookie_text.insert('1.0', cookie)
+
+    def _clear_cookie(self):
+        self.cookie_text.delete('1.0', tk.END)
+
+    def _update_cookie_status(self):
+        if self.cookie:
+            self.cookie_status_label.config(text=f"Cookie: 已设置 ({len(self.cookie)} 字符)", foreground='green')
+        else:
+            self.cookie_status_label.config(text="Cookie: 未设置", foreground='red')
+
+    def _clear_log(self):
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', tk.END)
+        self.log_text.configure(state='disabled')
+
+    def _open_output_dir(self):
+        if os.path.exists(OUTPUT_DIR):
+            os.startfile(OUTPUT_DIR)
+
+    def _open_log_dir(self):
+        if os.path.exists(LOG_DIR):
+            os.startfile(LOG_DIR)
+
+    def _open_path(self, path):
+        try:
+            if os.path.exists(path):
+                if os.path.isdir(path):
+                    os.startfile(path)
+                else:
+                    os.startfile(os.path.dirname(path))
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开路径: {e}")
+
+    def _log(self, msg):
+        self.log_queue.put(('line', msg))
+
+    def _log_cr(self, text):
+        self.log_queue.put(('cr', text))
+
+    def _process_log_queue(self):
+        try:
+            while True:
+                msg_type, msg = self.log_queue.get_nowait()
+                self.log_text.configure(state='normal')
+                if msg_type == 'line':
+                    self.log_text.insert(tk.END, msg + '\n')
+                elif msg_type == 'cr':
+                    last_newline = self.log_text.index('end-1c linestart')
+                    self.log_text.delete(last_newline, 'end-1c')
+                    self.log_text.insert(tk.END, msg)
+                self.log_text.see(tk.END)
+                self.log_text.configure(state='disabled')
+        except queue.Empty:
+            pass
+        self.root.after(50, self._process_log_queue)
+
+    def _check_scripts(self):
+        init_scripts()
+        self.script_status = {}
+        missing = []
+        for key, name in SCRIPT_NAMES.items():
+            path = SCRIPTS.get(key)
+            if path:
+                self.script_status[key] = ("ok", path)
+            else:
+                self.script_status[key] = ("missing", None)
+                missing.append(name)
+        self._refresh_script_buttons()
+        if hasattr(self, 'script_status_labels'):
+            self._update_script_info_display()
+        if missing:
+            msg = "以下脚本未在 scripts/ 目录中找到（按内容哈希验证）：\n\n"
+            for m in missing:
+                msg += f"  • {m}\n"
+            msg += f"\n脚本目录: {SCRIPTS_DIR}\n\n请将正确的脚本文件放入 scripts 目录后重新启动。"
+            messagebox.showwarning("脚本验证失败", msg)
+
+    def _refresh_script_buttons(self):
+        single_ok = "bspv" in SCRIPTS
+        search_ok = "bsps" in SCRIPTS
+        pgc_ok = "bsp" in SCRIPTS
+        self.download_single_btn.config(state='normal' if single_ok and not self.is_running else 'disabled')
+        self.download_search_btn.config(state='normal' if search_ok and not self.is_running else 'disabled')
+        self.download_pgc_btn.config(state='normal' if pgc_ok and not self.is_running else 'disabled')
+        batch_ok = single_ok or search_ok or pgc_ok
+        self.run_batch_btn.config(state='normal' if batch_ok and not self.is_running else 'disabled')
+
+    def _set_running(self, running):
+        self.is_running = running
+        self._refresh_script_buttons()
+        if running:
+            self.status_var.set("运行中...")
+        else:
+            self.status_var.set("就绪")
+
+    def _run_script_thread(self, script_path, inputs, task_name):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(LOG_DIR, f"{timestamp}_{task_name}_runner.log")
+
+        all_inputs = list(inputs) + [""]
+        input_text = "\n".join(str(x) for x in all_inputs) + "\n"
+        input_bytes = input_text.encode("utf-8")
+
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        env["BILI_BASE_DIR"] = BASE_DIR
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", script_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=BASE_DIR,
+                env=env,
+                bufsize=0,
+            )
+
+            self._log(f"\n{'='*60}")
+            self._log(f"  开始执行: {task_name}")
+            self._log(f"  脚本: {os.path.basename(script_path)}")
+            self._log(f"{'='*60}\n")
+
+            proc.stdin.write(input_bytes)
+            proc.stdin.flush()
+            proc.stdin.close()
+
+            buffer = ""
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                try:
+                    decoded = chunk.decode('utf-8', errors='replace')
+                except Exception:
+                    decoded = str(chunk)
+                buffer += decoded
+                while '\n' in buffer or '\r' in buffer:
+                    if '\r' in buffer and ('\n' not in buffer or buffer.index('\r') < buffer.index('\n')):
+                        cr_idx = buffer.index('\r')
+                        line = buffer[:cr_idx]
+                        buffer = buffer[cr_idx + 1:]
+                        if line:
+                            self._log_cr(line)
+                    elif '\n' in buffer:
+                        nl_idx = buffer.index('\n')
+                        line = buffer[:nl_idx]
+                        buffer = buffer[nl_idx + 1:]
+                        if line.endswith('\r'):
+                            line = line[:-1]
+                        self._log(line.rstrip())
+            if buffer:
+                self._log(buffer.rstrip())
+
+            proc.wait()
+            success = proc.returncode == 0
+
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"任务名称: {task_name}\n")
+                f.write(f"脚本: {os.path.basename(script_path)}\n")
+                f.write(f"开始时间: {timestamp}\n")
+                f.write(f"返回码: {proc.returncode}\n")
+                f.write(f"状态: {'成功' if success else '失败'}\n")
+
+            self._log(f"\n  [完成] {task_name} - {'成功' if success else '失败'}")
+            return success
+
+        except Exception as e:
+            self._log(f"[错误] {e}")
+            return False
+
+    def _prepare_cookie_file(self, cookie):
+        if cookie:
+            with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+                f.write(cookie)
+        else:
+            if os.path.exists(COOKIE_FILE):
+                try:
+                    os.remove(COOKIE_FILE)
+                except Exception:
+                    pass
+
+    def _download_single(self):
+        if self.is_running:
+            return
+        bv = self.bv_entry.get().strip()
+        if not bv:
+            messagebox.showwarning("提示", "请输入BV号")
+            return
+        quality = self.quality_entry.get().strip()
+        if not quality:
+            quality = "80"
+        cookie = self.cookie_text.get('1.0', tk.END).strip()
+
+        self._set_running(True)
+
+        def worker():
+            self._prepare_cookie_file(cookie)
+            inputs = [bv, "", quality]
+            self._run_script_thread(SCRIPTS["bspv"], inputs, f"单视频_{bv}")
+            self.root.after(0, lambda: self._set_running(False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_search(self):
+        if self.is_running:
+            return
+        keyword = self.keyword_entry.get().strip()
+        if not keyword:
+            messagebox.showwarning("提示", "请输入搜索关键词")
+            return
+        count_str = self.count_entry.get().strip()
+        try:
+            count = int(count_str) if count_str else 5
+        except ValueError:
+            count = 5
+        cookie = self.cookie_text.get('1.0', tk.END).strip()
+
+        self._set_running(True)
+
+        def worker():
+            self._prepare_cookie_file(cookie)
+            inputs = [keyword, str(count)]
+            if not cookie:
+                inputs.append("")
+            self._run_script_thread(SCRIPTS["bsps"], inputs, f"批量下载_{keyword}")
+            self.root.after(0, lambda: self._set_running(False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_pgc(self):
+        if self.is_running:
+            return
+        url = self.pgc_entry.get().strip()
+        if not url:
+            messagebox.showwarning("提示", "请输入番剧URL")
+            return
+        cookie = self.cookie_text.get('1.0', tk.END).strip()
+
+        self._set_running(True)
+
+        def worker():
+            self._prepare_cookie_file(cookie)
+            inputs = [url]
+            if not cookie:
+                inputs.append("")
+            inputs.append("1")
+            inputs.append("y")
+            self._run_script_thread(SCRIPTS["bsp"], inputs, "番剧下载")
+            self.root.after(0, lambda: self._set_running(False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_batch_tasks(self):
+        if self.is_running:
+            return
+        if not self.batch_tasks:
+            messagebox.showwarning("提示", "任务列表为空，请先添加任务")
+            return
+
+        cookie = self.cookie_text.get('1.0', tk.END).strip()
+
+        confirm = messagebox.askyesno("确认", f"即将执行 {len(self.batch_tasks)} 个任务，是否开始？")
+        if not confirm:
+            return
+
+        self._set_running(True)
+
+        def worker():
+            self._prepare_cookie_file(cookie)
+            results = []
+            start_time = time.time()
+            total = len(self.batch_tasks)
+
+            for i, task in enumerate(self.batch_tasks, 1):
+                self._log(f"\n\n{'#'*60}")
+                self._log(f"#  任务 {i}/{total}: {task['desc']}")
+                self._log(f"{'#'*60}\n")
+
+                if task["type"] == "bv":
+                    quality = task.get("quality") or "80"
+                    inputs = [task["bv"], "", quality]
+                    ok = self._run_script_thread(
+                        SCRIPTS["bspv"], inputs, f"单视频_{task['bv']}"
+                    )
+                elif task["type"] == "search":
+                    inputs = [task["keyword"], str(task["count"])]
+                    if not cookie:
+                        inputs.append("")
+                    ok = self._run_script_thread(
+                        SCRIPTS["bsps"], inputs, f"批量下载_{task['keyword']}"
+                    )
+                elif task["type"] == "pgc":
+                    inputs = [task["url"]]
+                    if not cookie:
+                        inputs.append("")
+                    inputs.append("1")
+                    inputs.append("y")
+                    ok = self._run_script_thread(
+                        SCRIPTS["bsp"], inputs, "番剧下载"
+                    )
+                else:
+                    ok = False
+
+                results.append({"task": task, "success": ok})
+
+            elapsed = time.time() - start_time
+            success_count = sum(1 for r in results if r["success"])
+
+            self._log("\n" + "="*60)
+            self._log("  全部任务执行完毕")
+            self._log(f"  总耗时: {elapsed:.1f} 秒")
+            self._log(f"  成功: {success_count}/{total}")
+            self._log("="*60)
+            self._log("\n任务详情:")
+            for i, r in enumerate(results, 1):
+                status = "✓ 成功" if r["success"] else "✗ 失败"
+                self._log(f"  {i}. {status} - {r['task']['desc']}")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            summary_file = os.path.join(LOG_DIR, f"{timestamp}_batch_summary.txt")
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write("===== 批量任务汇总 =====\n")
+                f.write(f"总耗时: {elapsed:.1f} 秒\n")
+                f.write(f"成功: {success_count}/{total}\n\n")
+                for i, r in enumerate(results, 1):
+                    f.write(f"--- 任务 {i} ---\n")
+                    f.write(f"  描述: {r['task']['desc']}\n")
+                    f.write(f"  状态: {'成功' if r['success'] else '失败'}\n\n")
+            self._log(f"\n详细汇总已保存到: {summary_file}")
+
+            self.root.after(0, lambda: self._set_running(False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+def main():
+    root = tk.Tk()
+    app = BilibiliDownloaderGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
